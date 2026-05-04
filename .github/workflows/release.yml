@@ -1,0 +1,147 @@
+name: Build & Release WASM Parsers
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      pin_ref:
+        description: 'arborist.nvim ref to read pins.toml from (tag, branch, or SHA). Defaults to main.'
+        required: false
+        default: main
+      release_tag:
+        description: 'Tag name to publish under (only used by workflow_dispatch). Leave blank to skip release upload.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout wasm-parsers
+        uses: actions/checkout@v4
+
+      - name: Determine refs
+        id: refs
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tag="${GITHUB_REF#refs/tags/}"
+            pin_ref="$tag"
+          else
+            tag="${{ inputs.release_tag }}"
+            pin_ref="${{ inputs.pin_ref || 'main' }}"
+          fi
+          # workflow_dispatch with no release_tag is a build-only run; we still
+          # need *something* in the manifest's `tag` field for URL construction
+          # so consumers can verify per-artifact URLs match the source of truth.
+          # Use a synthetic dev-<run_id> name; the publish step is gated on a
+          # non-empty release_tag so nothing actually gets uploaded as a release.
+          if [ -z "$tag" ]; then tag="dev-${{ github.run_id }}"; fi
+          echo "tag=$tag"           >> "$GITHUB_OUTPUT"
+          echo "pin_ref=$pin_ref"   >> "$GITHUB_OUTPUT"
+          echo "release_tag=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout arborist.nvim
+        uses: actions/checkout@v4
+        with:
+          repository: arborist-ts/arborist.nvim
+          ref: ${{ steps.refs.outputs.pin_ref }}
+          path: arborist
+
+      - name: Resolve arborist pins SHA
+        id: pins
+        run: |
+          sha=$(git -C arborist rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+          key: cargo-tree-sitter-cli
+
+      - name: Install tree-sitter CLI
+        run: |
+          if ! command -v tree-sitter >/dev/null; then
+            cargo install --locked tree-sitter-cli
+          fi
+          tree-sitter --version
+
+      - name: Cache wasi-sdk (~80 MB)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/tree-sitter
+          key: tree-sitter-cache-v1
+
+      - name: Build all parsers
+        run: |
+          mkdir -p out
+          ./scripts/build-all.sh arborist/registry/pins.toml parsers.txt out
+
+      - name: Pin Neovim build
+        id: nvim
+        run: |
+          # Use a specific Neovim 0.12 nightly. The artifact published in this
+          # release is verified against this exact build; consumers compare via
+          # manifest.tested_with_neovim.
+          NVIM_URL="https://github.com/neovim/neovim/releases/download/nightly/nvim-linux-x86_64.tar.gz"
+          curl -fsSL -o nvim.tar.gz "$NVIM_URL"
+          tar xzf nvim.tar.gz
+          mv nvim-linux-x86_64 nvim
+          echo "id=$(./nvim/bin/nvim --version | head -1 | tr -d '\n')" >> "$GITHUB_OUTPUT"
+          echo "$PWD/nvim/bin" >> "$GITHUB_PATH"
+
+      - name: Verify each parser actually loads
+        # Use `-c luafile` (NOT `-l`) — `nvim -l` doesn't initialize wasmtime
+        # in current Neovim builds and language.add unconditionally fails for
+        # WASM parsers. Script reads WASM_OUT_DIR via env and exits non-zero
+        # on any failure (cq 1 inside the script).
+        env:
+          WASM_OUT_DIR: out
+        run: nvim --headless -c 'luafile scripts/verify-load.lua' -c 'qa!'
+
+      - name: Bundle the popular tier
+        run: |
+          tar czf out/popular.tar.gz -C out --exclude='*.tar.gz' --exclude='manifest.json' .
+          ls -la out/popular.tar.gz
+
+      - name: Generate manifest
+        run: |
+          nvim -l scripts/make-manifest.lua \
+            out \
+            "${{ steps.refs.outputs.tag }}" \
+            arborist/registry/pins.toml \
+            "arborist-ts/arborist.nvim@${{ steps.pins.outputs.sha }}" \
+            "${{ steps.nvim.outputs.id }}" \
+            out/manifest.json
+          cat out/manifest.json | head -c 2000
+          echo
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-parsers-${{ steps.refs.outputs.tag || github.run_id }}
+          path: out/
+
+      - name: Publish release
+        # Only publish when triggered by a real tag push, or when
+        # workflow_dispatch was given an explicit release_tag. Build-only
+        # runs (dev-<run_id> synthetic tag) just upload artifacts above.
+        if: github.event_name == 'push' || steps.refs.outputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.refs.outputs.tag }}" \
+            out/*.wasm \
+            out/popular.tar.gz \
+            out/manifest.json \
+            --generate-notes \
+            --title "${{ steps.refs.outputs.tag }}"

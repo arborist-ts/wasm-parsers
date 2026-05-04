@@ -1,0 +1,5 @@
+out/
+nvim/
+nvim.tar.gz
+*.wasm
+*.tar.gz
