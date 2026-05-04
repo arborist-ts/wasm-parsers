@@ -134,10 +134,14 @@ jobs:
           echo
 
       - name: Upload artifacts
+        # Run even on verify-load / bundle / manifest failure so the .wasm
+        # files are downloadable for offline diagnosis.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: wasm-parsers-${{ steps.refs.outputs.tag || github.run_id }}
           path: out/
+          if-no-files-found: warn
 
       - name: Publish release
         # Only publish when triggered by a real tag push, or when

@@ -27,6 +27,14 @@ for line in (vim.fn.execute("version") or ""):gmatch("[^\n]+") do
   end
 end
 io.write("has('wasmtime'): " .. tostring(vim.fn.has("wasmtime")) .. "\n")
+do
+  local r = vim.system({ "tree-sitter", "--version" }, { text = true }):wait()
+  io.write("tree-sitter CLI: " .. ((r.stdout or ""):gsub("%s+$", "")) .. "\n")
+end
+do
+  local r = vim.system({ "uname", "-a" }, { text = true }):wait()
+  io.write("uname: " .. ((r.stdout or ""):gsub("%s+$", "")) .. "\n")
+end
 io.write("cwd: " .. (vim.uv.cwd() or "?") .. "\n")
 io.write("WASM_OUT_DIR: " .. out_dir .. "\n")
 io.write("\n")
