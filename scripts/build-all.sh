@@ -23,6 +23,10 @@ PARSERS_TOML="$(dirname "$PINS")/parsers.toml"
 [[ -f "$PARSERS_TOML" ]] || { echo "missing $PARSERS_TOML" >&2; exit 1; }
 
 mkdir -p "$OUT"
+# Resolve OUT to an absolute path. tree-sitter build's wasm-ld writes
+# relative paths against CWD, and we cd into per-parser tempdirs below;
+# without this, `-o $OUT/$lang.wasm` would resolve inside the tempdir.
+OUT=$(cd "$OUT" && pwd)
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
@@ -74,7 +78,9 @@ while IFS= read -r lang; do
   fi
 
   echo "[$lang] tree-sitter build --wasm"
-  if ! (cd "$build_dir" && tree-sitter build --wasm -o "$OUT/$lang.wasm"); then
+  # Pass build_dir as positional PATH arg instead of cd-ing — keeps wasm-ld's
+  # relative-path output behavior aligned with the absolute $OUT.
+  if ! tree-sitter build --wasm -o "$OUT/$lang.wasm" "$build_dir"; then
     echo "[$lang] BUILD FAILED" >&2
     fail=1
     continue
