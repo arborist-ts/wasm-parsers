@@ -66,12 +66,20 @@ jobs:
           path: |
             ~/.cargo/bin
             ~/.cargo/registry
-          key: cargo-tree-sitter-cli
+          # Bump suffix when TREE_SITTER_VERSION below changes.
+          key: cargo-tree-sitter-cli-0.26.8
 
       - name: Install tree-sitter CLI
+        # Pin the version. A newer CLI may emit parsers with a tree-sitter
+        # ABI version that the pinned Neovim build's wasmtime doesn't yet
+        # support, manifesting as silent `loadparser` nil-returns at
+        # verify-load time. Bump in lockstep with Neovim ABI bumps.
+        env:
+          TREE_SITTER_VERSION: '0.26.8'
         run: |
-          if ! command -v tree-sitter >/dev/null; then
-            cargo install --locked tree-sitter-cli
+          if ! command -v tree-sitter >/dev/null \
+             || [ "$(tree-sitter --version | awk '{print $2}')" != "$TREE_SITTER_VERSION" ]; then
+            cargo install --locked --version "$TREE_SITTER_VERSION" tree-sitter-cli
           fi
           tree-sitter --version
 
