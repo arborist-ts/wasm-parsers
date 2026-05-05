@@ -177,8 +177,13 @@ jobs:
         run: nvim --headless -c 'luafile scripts/verify-load.lua' -c 'qa!'
 
       - name: Bundle the popular tier
+        # Write the tarball outside out/ first, then move it in. Writing
+        # the bundle into out/ while tar reads out/ races: tar notices the
+        # directory mtime changing as we append bytes to the new file and
+        # exits 1 with "file changed as we read it".
         run: |
-          tar czf out/popular.tar.gz -C out --exclude='*.tar.gz' --exclude='manifest.json' .
+          tar czf /tmp/popular.tar.gz -C out $(cd out && ls *.wasm)
+          mv /tmp/popular.tar.gz out/popular.tar.gz
           ls -la out/popular.tar.gz
 
       - name: Generate manifest
