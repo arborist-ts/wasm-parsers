@@ -94,18 +94,78 @@ jobs:
           mkdir -p out
           ./scripts/build-all.sh arborist/registry/pins.toml parsers.txt out
 
-      - name: Pin Neovim build
+      - name: Cache wasm-capable Neovim build
+        # Neovim's official prebuilt Linux tarballs ship with
+        # ENABLE_WASMTIME=OFF, so `vim.treesitter.language.add` for .wasm
+        # files unconditionally returns nil. We build Neovim from source
+        # against a pinned wasmtime C-API release. Cache the result so
+        # repeat runs skip the ~30s rebuild.
+        id: nvim-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            /opt/wasm-nvim
+            /opt/wasmtime
+          key: wasm-nvim-${{ env.NVIM_VERSION }}-wasmtime-${{ env.WASMTIME_VERSION }}-ubuntu-${{ runner.os }}-v2
+        env:
+          NVIM_VERSION: v0.12.2
+          WASMTIME_VERSION: 36.0.6
+
+      - name: Build wasm-capable Neovim
+        if: steps.nvim-cache.outputs.cache-hit != 'true'
+        env:
+          NVIM_VERSION: v0.12.2
+          WASMTIME_VERSION: 36.0.6
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends \
+            cmake gettext libtool-bin pkg-config unzip ninja-build build-essential
+          # Prebuilt wasmtime C API (Neovim's deps build can pull this from
+          # source but that requires Rust + 10+ minutes; prebuilt is seconds).
+          curl -fsSL -o /tmp/wt.tar.xz \
+            "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/wasmtime-v${WASMTIME_VERSION}-x86_64-linux-c-api.tar.xz"
+          sudo mkdir -p /opt/wasmtime
+          sudo tar -C /opt/wasmtime --strip-components=1 -xJf /tmp/wt.tar.xz
+          # Neovim source pinned to NVIM_VERSION
+          git clone --depth 1 -b "$NVIM_VERSION" https://github.com/neovim/neovim.git /tmp/nvim-src
+          cd /tmp/nvim-src
+          export CMAKE_INCLUDE_PATH=/opt/wasmtime/include
+          export CMAKE_LIBRARY_PATH=/opt/wasmtime/lib
+          # Deps build — wasmtime is fed via the include/library paths above
+          # and USE_BUNDLED_WASMTIME=OFF so we don't rebuild from source.
+          cmake -S cmake.deps -B .deps -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_WASMTIME=ON -DUSE_BUNDLED_WASMTIME=OFF \
+            -DWASMTIME_INCLUDE_DIR=/opt/wasmtime/include \
+            -DWASMTIME_LIBRARY=/opt/wasmtime/lib/libwasmtime.a
+          cmake --build .deps
+          # Main build with wasm support
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_WASMTIME=ON \
+            -DWASMTIME_INCLUDE_DIR=/opt/wasmtime/include \
+            -DWASMTIME_LIBRARY=/opt/wasmtime/lib/libwasmtime.a \
+            -DCMAKE_PREFIX_PATH=/tmp/nvim-src/.deps/usr
+          cmake --build build
+          # Stage built nvim + runtime for cache
+          sudo mkdir -p /opt/wasm-nvim
+          sudo cp build/bin/nvim /opt/wasm-nvim/nvim
+          sudo cp -r runtime /opt/wasm-nvim/runtime
+
+      - name: Use wasm-capable Neovim
         id: nvim
         run: |
-          # Use a specific Neovim 0.12 nightly. The artifact published in this
-          # release is verified against this exact build; consumers compare via
-          # manifest.tested_with_neovim.
-          NVIM_URL="https://github.com/neovim/neovim/releases/download/nightly/nvim-linux-x86_64.tar.gz"
-          curl -fsSL -o nvim.tar.gz "$NVIM_URL"
-          tar xzf nvim.tar.gz
-          mv nvim-linux-x86_64 nvim
-          echo "id=$(./nvim/bin/nvim --version | head -1 | tr -d '\n')" >> "$GITHUB_OUTPUT"
-          echo "$PWD/nvim/bin" >> "$GITHUB_PATH"
+          sudo ln -sf /opt/wasm-nvim/nvim /usr/local/bin/nvim
+          echo "VIMRUNTIME=/opt/wasm-nvim/runtime" >> "$GITHUB_ENV"
+          # Confirm wasmtime support is actually wired up.
+          export VIMRUNTIME=/opt/wasm-nvim/runtime
+          nvim --version | head -3
+          got=$(nvim --headless -c 'lua io.write(type(vim._ts_add_language_from_wasm))' -c 'qa!' 2>&1)
+          if [ "$got" != "function" ]; then
+            echo "::error::wasmtime not wired into nvim build (got: $got)"
+            exit 1
+          fi
+          echo "id=$(nvim --version | head -1)" >> "$GITHUB_OUTPUT"
 
       - name: Verify each parser actually loads
         # Use `-c luafile` (NOT `-l`) — `nvim -l` doesn't initialize wasmtime

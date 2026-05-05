@@ -28,13 +28,14 @@ for line in (vim.fn.execute("version") or ""):gmatch("[^\n]+") do
 end
 io.write("has('wasmtime'): " .. tostring(vim.fn.has("wasmtime")) .. "\n")
 do
-  local r = vim.system({ "tree-sitter", "--version" }, { text = true }):wait()
-  io.write("tree-sitter CLI: " .. ((r.stdout or ""):gsub("%s+$", "")) .. "\n")
+  local ok, r = pcall(function() return vim.system({ "tree-sitter", "--version" }, { text = true }):wait() end)
+  io.write("tree-sitter CLI: " .. (ok and ((r.stdout or ""):gsub("%s+$", "")) or "(not found)") .. "\n")
 end
 do
-  local r = vim.system({ "uname", "-a" }, { text = true }):wait()
-  io.write("uname: " .. ((r.stdout or ""):gsub("%s+$", "")) .. "\n")
+  local ok, r = pcall(function() return vim.system({ "uname", "-a" }, { text = true }):wait() end)
+  io.write("uname: " .. (ok and ((r.stdout or ""):gsub("%s+$", "")) or "(unknown)") .. "\n")
 end
+io.write("vim._ts_add_language_from_wasm: " .. tostring(type(vim._ts_add_language_from_wasm)) .. "\n")
 io.write("cwd: " .. (vim.uv.cwd() or "?") .. "\n")
 io.write("WASM_OUT_DIR: " .. out_dir .. "\n")
 io.write("\n")
